@@ -24,6 +24,7 @@ import com.waz.api.impl.ErrorResponse
 import com.waz.content.GlobalPreferences.BackendDrift
 import com.waz.content.UserPreferences.LastStableNotification
 import com.waz.content.{GlobalPreferences, UserPreferences}
+import com.waz.model.Event.EventDecoder
 import com.waz.model._
 import com.waz.model.otr.ClientId
 import com.waz.service.ZMessaging.{accountTag, clock}
@@ -84,7 +85,7 @@ class PushServiceImpl(context:         Context,
                       clientId:        ClientId,
                       accountId:       AccountId,
                       pipeline:        EventPipeline,
-                      otrServiceImpl:  OtrService,
+                      otrService:      OtrService,
                       webSocket:       WebSocketClientService,
                       network:         NetworkModeService,
                       lifeCycle:       UiLifeCycle,
@@ -110,6 +111,14 @@ class PushServiceImpl(context:         Context,
 
   private var subs = Seq.empty[Subscription]
 
+  decryptedEvents.list().map { nots =>
+    if(nots.nonEmpty) {
+      processStoredNotifications(nots)
+    }
+  }
+
+  decryptedEvents.onAdded(processStoredNotifications)
+
   webSocket.client.on(dispatcher) {
     case None =>
       subs.foreach(_.destroy())
@@ -124,9 +133,9 @@ class PushServiceImpl(context:         Context,
             case NotificationsResponseEncoded(notifications@_*) =>
               verbose(s"got notifications from data: $content")
               fetchInProgress = if (fetchInProgress.isCompleted)
-                decryptAndStoreEvents(notifications)
+                decryptAndStoreNotifications(notifications)
               else
-                fetchInProgress.flatMap(_ => decryptAndStoreEvents(notifications))
+                fetchInProgress.flatMap(_ => decryptAndStoreNotifications(notifications))
             case resp =>
               error(s"unexpected push response: $resp")
           }
@@ -142,8 +151,9 @@ class PushServiceImpl(context:         Context,
   /**
     * Decrypt events without decoding rest of events from JSON,
     * this saves us from writing encoders for all event types */
-  private def decryptAndStoreEvents(nots: Seq[PushNotificationEncoded]): Future[Unit] = {
+  private def decryptAndStoreNotifications(nots: Seq[PushNotificationEncoded]): Future[Unit] = {
     import MessageEvent._
+    import JSONHelpers._
 
     def isOtrEventJson(ev: JSONObject): Boolean =
     ev.getString("type").equals("conversation.otr-message-add") ||
@@ -152,7 +162,7 @@ class PushServiceImpl(context:         Context,
     def decryptOtrEvents(events: Seq[JSONObject]) = {
       val otrEvents =
         events
-          .zip(1 to events.length)
+          .zipWithIndex
           .foldLeft(Map.empty[Int, OtrEvent]) { case (map, (obj, index)) =>
             if (isOtrEventJson(obj)) {
               map + (index -> ConversationEvent.ConversationEventDecoder(obj).asInstanceOf[OtrEvent])
@@ -162,32 +172,45 @@ class PushServiceImpl(context:         Context,
           }
 
       Future.sequence(otrEvents.map { case (index, event) =>
-        otrServiceImpl.eventTransformer(Vector(event)).flatMap { result =>
+        otrService.eventTransformer(Vector(event)).flatMap { result =>
           Future.successful(if (result.nonEmpty) (index, Some(result.head)) else (index, None))
         }
       })
-        .map {
-          _.foldLeft(events) { case (jsonEvents, (index, eventOpt)) =>
-            eventOpt match {
-              case Some(me: MessageEvent) => jsonEvents.updated(index, MessageEventEncoder(me))
-              case Some(e) => error(s"Event $e is not a MessageEvent, ignoring"); jsonEvents
-              case None => jsonEvents.take(index - 1) ++ jsonEvents.drop(index)
-            }
+      .map {
+        _.foldLeft(events) { case (jsonEvents, (index, eventOpt)) =>
+          eventOpt match {
+            case Some(me: MessageEvent) => jsonEvents.updated(index, MessageEventEncoder(me))
+            case Some(e) => error(s"Event $e is not a MessageEvent, ignoring"); jsonEvents
+            case None => jsonEvents.take(index - 1) ++ jsonEvents.drop(index)
           }
         }
+      }
     }
 
-    Future.sequence(nots.map(not => {
-      import JSONHelpers._
-      decryptOtrEvents(not.events.JSONArrayToVector).map { decryptedEvents =>
-        PushNotificationEncoded(not.id, vectorToJSONArray(decryptedEvents), not.transient)
-      }
-    })).flatMap { encodedNots =>
+    Future.sequence {
+      nots.map(not => {
+        decryptOtrEvents(not.events.JSONArrayToVector).map { decryptedEvents =>
+          PushNotificationEncoded(not.id, vectorToJSONArray(decryptedEvents), not.transient)
+        }
+      })
+    }.flatMap { encodedNots =>
       decryptedEvents.insertAll(encodedNots).map(_ => Unit)
     }
   }
 
-  private def onPushNotifications(allNs: Seq[PushNotification]): Future[Unit] =
+  private def processStoredNotifications(nots: Seq[PushNotificationEncoded]): Future[Unit] = {
+
+    def decodePushNotifications(notifications: Seq[PushNotificationEncoded]) = {
+      verbose("Decoding notifications from JSON")
+      import com.waz.model.JSONHelpers.RichJSONArray
+      notifications.map(n =>
+        PushNotification(n.id,
+          n.events.foldLeft(Seq.empty[Event])((seq, obj) => seq :+ EventDecoder(obj)),
+          n.transient))
+    }
+
+    val allNs = decodePushNotifications(nots)
+    verbose("Parsing stored notifications")
     if (allNs.nonEmpty) {
       verbose(s"onPushNotifications: ${allNs.size}")
       val ns = allNs.filter(_.hasEventForClient(clientId))
@@ -198,11 +221,14 @@ class PushServiceImpl(context:         Context,
           verbose(s"event: $ev")
         })
       }.flatMap { _ =>
+        verbose("deleting processed notifications")
+        decryptedEvents.removeAll(nots.map(_.id))
         ns.lift(ns.lastIndexWhere(!_.transient)).fold(Future.successful({}))(n => idPref := Some(n.id))
       }.andThen {
         case _ => processing ! false
       }
     } else Future.successful({})
+  }
 
   case class Results(notifications: Vector[PushNotificationEncoded], time: Option[Instant], historyLost: Boolean)
 
@@ -267,7 +293,7 @@ class PushServiceImpl(context:         Context,
           onFetchedPushNotifications ! pushes.map(p => p.copy(toFetch = Some(p.receivedAt.until(clock.instant + drift))))
 
         nots
-      }).flatMap(decryptAndStoreEvents)
+      }).flatMap(decryptAndStoreNotifications)
 
     if (fetchInProgress.isCompleted) {
       verbose(s"Sync history in response to $reason")

@@ -359,7 +359,7 @@ object JSONHelpers {
   implicit class RichJSONArray(js: JSONArray) {
     def foldLeft[B](z: B)(op: (B, JSONObject) => B): B = {
       var result = z
-      for (i <- 0 to js.length()) {
+      for (i <- 0 until js.length()) {
         result = op(result, js.getJSONObject(i))
       }
       result

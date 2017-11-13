@@ -31,7 +31,6 @@ import com.waz.model._
 import com.waz.model.otr._
 import com.waz.service._
 import com.waz.service.conversation.ConversationsContentUpdaterImpl
-import com.waz.service.push.PushService
 import com.waz.sync.SyncServiceHandle
 import com.waz.sync.client.OtrClient
 import com.waz.sync.client.OtrClient.EncryptedContent
@@ -54,9 +53,9 @@ trait OtrService {
   def eventTransformer(events: Vector[Event]): Future[Vector[Event]]
 }
 
-class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrClientsService, push: PushService,
-                 cryptoBox: CryptoBoxService, members: MembersStorageImpl, convs: ConversationsContentUpdaterImpl,
-                 sync: SyncServiceHandle, cache: CacheService, metadata: MetaDataService, clientsStorage : OtrClientsStorage,
+class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrClientsService,
+                 cryptoBox: CryptoBoxService, members: MembersStorageImpl, sync: SyncServiceHandle,
+                 cache: CacheService, metadata: MetaDataService, clientsStorage : OtrClientsStorage,
                  prefs: GlobalPreferences) extends OtrService {
   import EventContext.Implicits.global
   import OtrService._

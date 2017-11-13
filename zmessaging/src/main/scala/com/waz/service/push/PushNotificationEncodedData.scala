@@ -19,15 +19,11 @@ package com.waz.service.push
 
 import android.content.Context
 import com.waz.content.Database
-import com.waz.db.Dao
-import com.waz.db.Col._
+import com.waz.model.PushNotificationEncodedData.PushNotificationEncodedDao
 import com.waz.model.Uid
-import com.waz.service.push.PushNotificationEncodedData.PushNotificationEncodedDao
 import com.waz.sync.client.PushNotificationEncoded
 import com.waz.utils.TrimmingLruCache.Fixed
-import com.waz.utils.wrappers.DBCursor
 import com.waz.utils.{CachedStorage, CachedStorageImpl, TrimmingLruCache}
-import org.json.JSONArray
 
 trait PushNotificationEncodedStorage extends CachedStorage[Uid, PushNotificationEncoded]
 
@@ -37,17 +33,3 @@ class PushNotificationEncodedStorageImpl(context: Context, storage: Database)
     with PushNotificationEncodedStorage
 
 
-object PushNotificationEncodedData {
-
-  implicit object PushNotificationEncodedDao extends Dao[PushNotificationEncoded, Uid] {
-    val Id = id[Uid]('_receivedAt, "PRIMARY KEY").apply(_.id)
-    val Data = text('events).apply(_.events.toString)
-    val Transient = bool('transient)(_.transient)
-
-    override val idCol = Id
-    override val table = Table("PushNotificationEncoded", Id, Data)
-
-    override def apply(implicit cursor: DBCursor): PushNotificationEncoded =
-      PushNotificationEncoded(Id, new JSONArray(cursor.getString(1)), Transient)
-  }
-}

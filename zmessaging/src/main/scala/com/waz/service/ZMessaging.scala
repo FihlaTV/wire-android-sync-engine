@@ -248,7 +248,7 @@ class ZMessaging(val teamId: Option[TeamId], val clientId: ClientId, val userMod
   lazy val openGraphSync    = wire[OpenGraphSyncHandler]
   lazy val handlesSync      = wire[HandlesSyncHandler]
 
-  lazy val eventPipeline: EventPipeline = new EventPipelineImpl(Vector(otrService.eventTransformer), eventScheduler.enqueue)
+  lazy val eventPipeline: EventPipeline = new EventPipelineImpl(Vector(), eventScheduler.enqueue)
 
   lazy val eventScheduler = {
 

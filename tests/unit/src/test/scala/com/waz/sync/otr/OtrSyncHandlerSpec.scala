@@ -57,7 +57,7 @@ import scala.concurrent.Future
 
   lazy val zms = new MockZMessaging(selfUserId = selfUser.id, clientId = clientId) {
 
-    override lazy val otrService: OtrServiceImpl = new OtrServiceImpl(selfUserId, clientId, otrClientsService, push, cryptoBox, membersStorage, convsContent, sync, cache, metadata, otrClientsStorage, prefs) {
+    override lazy val otrService: OtrServiceImpl = new OtrServiceImpl(selfUserId, clientId, otrClientsService, cryptoBox, membersStorage, sync, cache, metadata, otrClientsStorage, prefs) {
       override def encryptMessage(convId: ConvId, msg: GenericMessage, useFakeOnError: Boolean, previous: EncryptedContent, recipients: Option[Set[UserId]]): Future[EncryptedContent] = {
         encryptMsgRequests = encryptMsgRequests :+ (convId, msg, useFakeOnError)
         Future successful encryptedContent

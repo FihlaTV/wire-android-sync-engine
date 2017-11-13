@@ -45,7 +45,9 @@ class MembersStorageImpl(context: Context, storage: ZmsDatabase) extends CachedS
 
   def getByUser(user: UserId) = find(_.userId == user, ConversationMemberDataDao.findForUser(user)(_), identity)
 
-  def activeMembers(conv: ConvId): Signal[Set[UserId]] = new AggregatingSignal[Seq[(UserId, Boolean)], Set[UserId]](onConvMemberChanged(conv), getActiveUsers(conv).map(_.toSet), { (current, changes) =>
+  def activeMembers(conv: ConvId): Signal[Set[UserId]] =
+    new AggregatingSignal[Seq[(UserId, Boolean)], Set[UserId]](onConvMemberChanged(conv),
+                                                                getActiveUsers(conv).map(_.toSet), { (current, changes) =>
     val (active, inactive) = changes.partition(_._2)
 
     current -- inactive.map(_._1) ++ active.map(_._1)
