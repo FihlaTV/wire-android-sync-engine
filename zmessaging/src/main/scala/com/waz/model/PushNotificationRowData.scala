@@ -17,23 +17,20 @@
  */
 package com.waz.model
 
-import com.waz.sync.client.PushNotificationEncoded
 import com.waz.db.Dao
 import com.waz.db.Col._
 import com.waz.utils.wrappers.{DB, DBCursor}
-import org.json.JSONArray
 
-object PushNotificationEncodedData {
-  implicit object PushNotificationEncodedDao extends Dao[PushNotificationEncoded, Uid] {
+object PushNotificationRowData {
+  implicit object PushNotificationRowDao extends Dao[PushNotificationRow, Uid] {
     private val Id = id[Uid]('_id, "PRIMARY KEY").apply(_.id)
-    private val Data = text('events).apply(_.events.toString)
     private val Transient = bool('transient)(_.transient)
 
     override val idCol = Id
-    override val table = Table("PushNotifications", Id, Data, Transient)
+    override val table = Table("PushNotifications", Id, Transient)
 
-    override def apply(implicit cursor: DBCursor): PushNotificationEncoded =
-      PushNotificationEncoded(Id, new JSONArray(cursor.getString(1)), Transient)
+    override def apply(implicit cursor: DBCursor): PushNotificationRow =
+      PushNotificationRow(Id, Transient)
 
     override def onCreate(db: DB): Unit = {
       super.onCreate(db)
@@ -41,3 +38,5 @@ object PushNotificationEncodedData {
     }
   }
 }
+
+case class PushNotificationRow(id: Uid, transient: Boolean)

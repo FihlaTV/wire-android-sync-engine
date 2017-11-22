@@ -19,17 +19,14 @@ package com.waz.service.push
 
 import android.content.Context
 import com.waz.content.Database
-import com.waz.model.PushNotificationEncodedData.PushNotificationEncodedDao
-import com.waz.model.Uid
-import com.waz.sync.client.PushNotificationEncoded
+import com.waz.model.PushNotificationRowData.PushNotificationRowDao
+import com.waz.model.{PushNotificationRow, Uid}
 import com.waz.utils.TrimmingLruCache.Fixed
 import com.waz.utils.{CachedStorage, CachedStorageImpl, TrimmingLruCache}
 
-trait PushNotificationEncodedStorage extends CachedStorage[Uid, PushNotificationEncoded]
+trait PushNotificationRowStorage extends CachedStorage[Uid, PushNotificationRow]
 
-class PushNotificationEncodedStorageImpl(context: Context, storage: Database)
-  extends CachedStorageImpl[Uid, PushNotificationEncoded](new TrimmingLruCache(context, Fixed(100)),
-                                              storage)(PushNotificationEncodedDao)
-    with PushNotificationEncodedStorage
-
-
+class PushNotificationRowStorageImpl(context: Context, storage: Database)
+  extends CachedStorageImpl[Uid, PushNotificationRow](new TrimmingLruCache(context, Fixed(100)),
+                                              storage)(PushNotificationRowDao)
+    with PushNotificationRowStorage

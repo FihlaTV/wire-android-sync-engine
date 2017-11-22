@@ -76,20 +76,21 @@ trait PushService {
   def beDrift: Signal[Duration]
 }
 
-class PushServiceImpl(context:         Context,
-                      userPrefs:       UserPreferences,
-                      prefs:           GlobalPreferences,
-                      receivedPushes:  ReceivedPushStorage,
-                      decryptedEvents: PushNotificationEncodedStorage,
-                      client:          PushNotificationsClient,
-                      clientId:        ClientId,
-                      accountId:       AccountId,
-                      pipeline:        EventPipeline,
-                      otrService:      OtrService,
-                      webSocket:       WebSocketClientService,
-                      network:         NetworkModeService,
-                      lifeCycle:       UiLifeCycle,
-                      sync:            SyncServiceHandle)(implicit ev: AccountContext) extends PushService { self =>
+class PushServiceImpl(context:              Context,
+                      userPrefs:            UserPreferences,
+                      prefs:                GlobalPreferences,
+                      receivedPushes:       ReceivedPushStorage,
+                      notificationStorage:  PushNotificationEncodedStorage,
+                      eventsStorage:        PushNotificationEventsStorage,
+                      client:               PushNotificationsClient,
+                      clientId:             ClientId,
+                      accountId:            AccountId,
+                      pipeline:             EventPipeline,
+                      otrService:           OtrService,
+                      webSocket:            WebSocketClientService,
+                      network:              NetworkModeService,
+                      lifeCycle:            UiLifeCycle,
+                      sync:                 SyncServiceHandle)(implicit ev: AccountContext) extends PushService { self =>
   import PushService._
 
   implicit val logTag: LogTag = accountTag[PushServiceImpl](accountId)
@@ -111,11 +112,29 @@ class PushServiceImpl(context:         Context,
 
   private var subs = Seq.empty[Subscription]
 
-  decryptedEvents.list().map { nots =>
+  eventsStorage.list().map { nots =>
     if(nots.nonEmpty) {
+      nots
+        .groupBy(_.pushId)
+        .map { case (id, notList) =>
+            notList.map { event =>
+              if(!isOtrEventJson(event.event)) {
+                eventsStorage.setAsDecrypted(id, event.index)
+              } else {
+                val decodedOtrEvent = ConversationEvent.ConversationEventDecoder(event.event).asInstanceOf[OtrEvent]
+                val storer = (e: Array[Byte])
+                otrService.decryptStoredOtrEvent(decodedOtrEvent,
+                  eventsStorage.getPlainWriter(event.pushId, event.index))
+              }
+            }
+        }
       processStoredNotifications(nots)
     }
   }
+
+  def isOtrEventJson(ev: JSONObject): Boolean =
+    ev.getString("type").equals("conversation.otr-message-add") ||
+      ev.getString("type").equals("conversation.otr-asset-add")
 
   decryptedEvents.onAdded(processStoredNotifications)
 
@@ -133,9 +152,9 @@ class PushServiceImpl(context:         Context,
             case NotificationsResponseEncoded(notifications@_*) =>
               verbose(s"got notifications from data: $content")
               fetchInProgress = if (fetchInProgress.isCompleted)
-                decryptAndStoreNotifications(notifications)
+                notificationStorage.insertAll(notifications)
               else
-                fetchInProgress.flatMap(_ => decryptAndStoreNotifications(notifications))
+                fetchInProgress.flatMap(_ => notificationStorage.insertAll(notifications))
             case resp =>
               error(s"unexpected push response: $resp")
           }

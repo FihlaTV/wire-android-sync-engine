@@ -36,7 +36,7 @@ import com.waz.model.MessageContentIndexDao
 import com.waz.model.MessageData.MessageDataDao
 import com.waz.model.MsgDeletion.MsgDeletionDao
 import com.waz.model.NotificationData.NotificationDataDao
-import com.waz.model.PushNotificationEncodedData.PushNotificationEncodedDao
+import com.waz.model.PushNotificationRowData.PushNotificationRowDao
 import com.waz.model.SearchQueryCache.SearchQueryCacheDao
 import com.waz.model.UserData.UserDataDao
 import com.waz.model.otr.UserClients.UserClientsDao
@@ -62,7 +62,7 @@ object ZMessagingDB {
     SyncJobDao, NotificationDataDao, ErrorDataDao, ReceivedPushDataDao,
     ContactHashesDao, ContactsOnWireDao, InvitedContactsDao, UserClientsDao, LikingDao,
     ContactsDao, EmailAddressesDao, PhoneNumbersDao, CallLogEntryDao, MsgDeletionDao,
-    EditHistoryDao, MessageContentIndexDao, PushNotificationEncodedDao
+    EditHistoryDao, MessageContentIndexDao, PushNotificationRowDao
   )
 
   lazy val migrations = Seq(

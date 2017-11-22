@@ -30,7 +30,8 @@ import com.waz.model.GenericContent._
 import com.waz.model._
 import com.waz.model.otr._
 import com.waz.service._
-import com.waz.service.conversation.ConversationsContentUpdaterImpl
+import com.waz.service.push.PushNotificationEventsStorage
+import com.waz.service.push.PushNotificationEventsStorage.PlainWriter
 import com.waz.sync.SyncServiceHandle
 import com.waz.sync.client.OtrClient
 import com.waz.sync.client.OtrClient.EncryptedContent
@@ -51,6 +52,7 @@ trait OtrService {
   def decryptCloudMessage(data: Array[Byte], mac: Array[Byte]): Future[Option[JSONObject]]
   def decryptAssetData(assetId: AssetId, otrKey: Option[AESKey], sha: Option[Sha256], data: Option[Array[Byte]], encryption: Option[EncryptionAlgorithm]): Option[Array[Byte]]
   def eventTransformer(events: Vector[Event]): Future[Vector[Event]]
+  def decryptStoredOtrEvent(ev: OtrEvent, eventWriter: PlainWriter): Future[Either[OtrError, GenericMessage]]
 }
 
 class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrClientsService,
@@ -122,9 +124,10 @@ class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrCli
       msg  <- LoggedTry(GenericMessage(plain)).toOption
     } yield msg
 
-  private[otr] def decryptOtrEvent(ev: OtrEvent): Future[Either[OtrError, GenericMessage]] =
+  override def decryptStoredOtrEvent(ev: OtrEvent, eventWriter: PlainWriter)
+      : Future[Either[OtrError, Unit]] =
     clients.getOrCreateClient(ev.from, ev.sender) flatMap { _ =>
-      decryptMessage(ev.from, ev.sender, ev.ciphertext)
+      sessions.decryptMessage(sessionId(ev.from, ev.sender), ev.ciphertext, eventWriter)
         .map(Right(_))
         .recoverWith {
           case e: CryptoException =>
@@ -144,7 +147,7 @@ class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrCli
                 reportOtrError(e, ev)
                 Future successful Left(DecryptionError(e.getMessage, ev.from, ev.sender))
             }
-      }
+        }
     }
 
   // update client info and send error report to hockey, we want client info to somehow track originating platform
@@ -175,11 +178,9 @@ class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrCli
       None
   }
 
-  def decryptMessage(user: UserId, clientId: ClientId, msg: Array[Byte]): Future[GenericMessage] =
-    sessions.decryptMessage(sessionId(user, clientId), msg) .map { plain =>
-      verbose(s"decrypted data len: ${plain.length}")
-      GenericMessage(plain)
-    }
+  def decryptMessage(user: UserId, clientId: ClientId, msg: Array[Byte],
+                     eventWriter: PlainWriter): Future[Unit] =
+    sessions.decryptMessage(sessionId(user, clientId), msg, eventWriter)
 
   def encryptTargetedMessage(user: UserId, client: ClientId, msg: GenericMessage): Future[Option[OtrClient.EncryptedContent]] = {
     val msgData = GenericMessage.toByteArray(msg)
