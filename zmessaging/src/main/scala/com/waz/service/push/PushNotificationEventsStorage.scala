@@ -20,8 +20,9 @@ package com.waz.service.push
 import android.content.Context
 import com.waz.content.Database
 import com.waz.model.PushNotificationEvents.PushNotificationEventsDao
-import com.waz.model.{PushNotificationEvent, Uid}
+import com.waz.model._
 import com.waz.service.push.PushNotificationEventsStorage.PlainWriter
+import com.waz.threading.SerialDispatchQueue
 import com.waz.utils.TrimmingLruCache.Fixed
 import com.waz.utils.{CachedStorage, CachedStorageImpl, TrimmingLruCache}
 
@@ -36,24 +37,32 @@ trait PushNotificationEventsStorage extends CachedStorage[(Uid, Int), PushNotifi
   def events(): Future[Map[Uid, Seq[PushNotificationEvent]]]
   def setAsDecrypted(id: Uid, index: Int): Future[Unit]
   def getPlainWriter(id: Uid, index: Int): PlainWriter
+  def writeError(id: Uid, index: Int, error: OtrErrorEvent): Future[Unit]
 }
 
 class PushNotificationEventsStorageImpl(context: Context, storage: Database)
   extends CachedStorageImpl[(Uid, Int), PushNotificationEvent](new TrimmingLruCache(context, Fixed(100)),
-    storage)(PushNotificationEventsDao)
+    storage)(PushNotificationEventsDao, "PushNotificationEvents_Cached")
     with PushNotificationEventsStorage {
+  private implicit val dispatcher = new SerialDispatchQueue(name = "PushNotificationEventsStorage")
 
-    override def events(): Future[Map[Uid, Seq[PushNotificationEvent]]] =
-      list().map(_.groupBy(_.pushId))
+  override def events(): Future[Map[Uid, Seq[PushNotificationEvent]]] =
+    list().map(_.groupBy(_.pushId))
 
-    override def setAsDecrypted(id: Uid, index: Int): Future[Unit] = {
-      update((id, index), u => u.copy(decrypted = true)).map {
-        case None => Future.failed(sys.error(s"Failed to set event at index $index with id $id as decrypted"))
-        case _ => Unit
-      }
+  override def setAsDecrypted(id: Uid, index: Int): Future[Unit] = {
+    update((id, index), u => u.copy(decrypted = true)).map {
+      case None =>
+        Future.failed(sys.error(s"Failed to set event at index $index with id $id as decrypted"))
+      case _ => Unit
     }
+  }
 
-    override def getPlainWriter(id: Uid, index: Int): PlainWriter =
-      (plain: Array[Byte]) =>
-        update((id, index), r => r.copy(decrypted = true, plain = Some(plain))).map(_ => Unit)
+  override def getPlainWriter(id: Uid, index: Int): PlainWriter =
+    (plain: Array[Byte]) =>
+      update((id, index), _.copy(decrypted = true, plain = Some(plain))).map(_ => Unit)
+
+  override def writeError(id: Uid, index: Int, error: OtrErrorEvent): Future[Unit] =
+    update((id, index),
+        _.copy(decrypted = true, event = MessageEvent.MessageEventEncoder(error), plain = None))
+      .map(_ => Unit)
 }

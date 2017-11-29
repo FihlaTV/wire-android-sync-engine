@@ -30,7 +30,6 @@ import com.waz.model.GenericContent._
 import com.waz.model._
 import com.waz.model.otr._
 import com.waz.service._
-import com.waz.service.push.PushNotificationEventsStorage
 import com.waz.service.push.PushNotificationEventsStorage.PlainWriter
 import com.waz.sync.SyncServiceHandle
 import com.waz.sync.client.OtrClient
@@ -40,19 +39,19 @@ import com.waz.utils.crypto.AESUtils
 import com.waz.utils.events.{EventContext, Signal}
 import com.waz.utils.{LoggedTry, _}
 import com.wire.cryptobox.CryptoException
-import org.json.JSONObject
+import org.json.{JSONArray, JSONObject}
 
-import scala.annotation.tailrec
 import scala.concurrent.Future
-import scala.concurrent.Future.sequence
 import scala.concurrent.duration._
 
 
 trait OtrService {
   def decryptCloudMessage(data: Array[Byte], mac: Array[Byte]): Future[Option[JSONObject]]
-  def decryptAssetData(assetId: AssetId, otrKey: Option[AESKey], sha: Option[Sha256], data: Option[Array[Byte]], encryption: Option[EncryptionAlgorithm]): Option[Array[Byte]]
-  def eventTransformer(events: Vector[Event]): Future[Vector[Event]]
-  def decryptStoredOtrEvent(ev: OtrEvent, eventWriter: PlainWriter): Future[Either[OtrError, GenericMessage]]
+  def decryptAssetData(assetId: AssetId, otrKey: Option[AESKey], sha: Option[Sha256],
+                       data: Option[Array[Byte]], encryption: Option[EncryptionAlgorithm]): Option[Array[Byte]]
+  def decryptStoredOtrEvent(ev: OtrEvent, eventWriter: PlainWriter): Future[Either[OtrError, Unit]]
+  def parseGenericMessage(msgEvent: OtrMessageEvent, msg: GenericMessage): Option[MessageEvent]
+  def filterOtrEventsForOtherClients(events: JSONArray): JSONArray
 }
 
 class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrClientsService,
@@ -70,52 +69,50 @@ class OtrServiceImpl(selfUserId: UserId, clientId: ClientId, val clients: OtrCli
     Signal.wrap(sessions.onCreateFromMessage).throttle(15.seconds) { _ => clients.requestSyncIfNeeded(1.hour) }
   }
 
-  override def eventTransformer(events: Vector[Event]): Future[Vector[Event]] = {
-    @tailrec def transform(es: Vector[Event], accu: Vector[Future[Vector[Event]]]): Vector[Future[Vector[Event]]] =
-      if (es.isEmpty) accu
-      else {
-        val ph = isOtrEvent(es.head)
-        val (batch, remaining) = es.span(isOtrEvent(_) == ph)
-        val batched = if (ph) collectEvents(clientId, batch) else Future.successful(batch)
-        transform(remaining, accu :+ batched)
+  override def filterOtrEventsForOtherClients(events: JSONArray): JSONArray = {
+    import JSONHelpers._
+    events.foldLeft(new JSONArray){(res, obj) =>
+      val eventType = obj.getString("type")
+      if(eventType.startsWith("conversation.otr-message-add")) {
+        res.put(obj)
+      } else if(eventType.startsWith("conversation.otr") &&
+                !obj.getString("recipient").equals(clientId.str)) {
+          verbose(s"Skipping otr event not intended for us: $obj")
+          res
+      } else {
+        res
       }
-    sequence(transform(events, Vector.empty)).map(_.flatten)
+    }
   }
 
-  private lazy val isOtrEvent: Event => Boolean = PartialFunction.cond(_) { case _: OtrEvent => true }
-
-  private def collectEvents(clientId: ClientId, events: Vector[Event]): Future[Vector[Event]] =
-    Future.traverse(events) {
-      case ev @ OtrMessageEvent(conv, time, from, sender, `clientId`, data, extData) =>
-        decryptOtrEvent(ev) map {
-          case Left(Duplicate) => None
-          case Left(error) => Some(OtrErrorEvent(conv, time, from, error))
-          case Right(GenericMessage(msgId, External(key, sha))) =>
-            decodeExternal(key, Some(sha), extData) match {
-              case None =>
-                error(s"External message could not be decoded External($key, $sha), data: $extData")
-                Some(OtrErrorEvent(conv, time, from, DecryptionError("symmetric decryption failed", from, sender)))
-              case Some(GenericMessage(_, Calling(content))) =>
-                Some(CallMessageEvent(conv, time, from, sender, content)) //call messages need sender client id
-              case Some(extMsg) =>
-                Some(GenericMessageEvent(conv, time, from, extMsg).withLocalTime(ev.localTime))
-            }
-          case Right(GenericMessage(mId, SessionReset)) if metadata.internalBuild => // display session reset notifications in internal build
-             Some(GenericMessageEvent(conv, time, from, GenericMessage(mId, Text("System msg: session reset", Map.empty, Nil))))
-          case Right(GenericMessage(mId, SessionReset)) => None // ignore session reset notifications
-          case Right(GenericMessage(mId, Calling(content))) =>
+  override def parseGenericMessage(otrMsg: OtrMessageEvent, genericMsg: GenericMessage)
+      : Option[MessageEvent] = {
+    val conv = otrMsg.convId
+    val time = otrMsg.time
+    val from = otrMsg.from
+    val sender = otrMsg.sender
+    val extData = otrMsg.externalData
+    val localTime = otrMsg.localTime
+    genericMsg match {
+      case GenericMessage(_, External(key, sha)) =>
+        decodeExternal(key, Some(sha), extData) match {
+          case None =>
+            error(s"External message could not be decoded External($key, $sha), data: $extData")
+            Some(OtrErrorEvent(conv, time, from, DecryptionError("symmetric decryption failed", from, sender)))
+          case Some(GenericMessage(_, Calling(content))) =>
             Some(CallMessageEvent(conv, time, from, sender, content)) //call messages need sender client id
-          case Right(msg) =>
-            Some(GenericMessageEvent(conv, time, from, msg).withLocalTime(ev.localTime))
+          case Some(extMsg) =>
+            Some(GenericMessageEvent(conv, time, from, extMsg).withLocalTime(localTime))
         }
-
-      case ev: OtrEvent if ev.recipient != clientId =>
-        verbose(s"Skipping otr event not intended for us: $ev")
-        Future successful None
-      case ev =>
-        error(s"Unhandled OtrEvent: $ev")
-        Future successful None
-    } map (_.flatten)
+      case GenericMessage(mId, SessionReset) if metadata.internalBuild => // display session reset notifications in internal build
+        Some(GenericMessageEvent(conv, time, from, GenericMessage(mId, Text("System msg: session reset", Map.empty, Nil))))
+      case GenericMessage(_, SessionReset) => None // ignore session reset notifications
+      case GenericMessage(_, Calling(content)) =>
+        Some(CallMessageEvent(conv, time, from, sender, content)) //call messages need sender client id
+      case msg =>
+        Some(GenericMessageEvent(conv, time, from, msg).withLocalTime(localTime))
+    }
+  }
 
   private def decodeExternal(key: AESKey, sha: Option[Sha256], extData: Option[Array[Byte]]) =
     for {

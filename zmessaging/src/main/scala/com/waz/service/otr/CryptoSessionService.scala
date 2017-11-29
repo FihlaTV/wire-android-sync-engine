@@ -20,27 +20,26 @@ package com.waz.service.otr
 import android.util.Base64
 import com.waz.ZLog._
 import com.waz.ZLog.ImplicitTag._
-import com.waz.service.push.PushNotificationEventsStorage
 import com.waz.service.push.PushNotificationEventsStorage.PlainWriter
-import com.waz.threading.SerialDispatchQueue
+import com.waz.threading.Threading
 import com.waz.utils.events.{AggregatingSignal, EventStream}
-import com.waz.utils.{LoggedTry, returning}
+import com.waz.utils.{LoggedTry, Serialized, returning}
 import com.wire.cryptobox.{CryptoBox, CryptoSession, PreKey}
 
-import scala.concurrent.{Await, Future}
+import scala.concurrent.Future
 
 class CryptoSessionService(cryptoBox: CryptoBoxService) {
 
-  private val dispatchers = Array.fill(17)(new SerialDispatchQueue(name = s"CryptoSessionDispatchQueue"))
+  implicit val dis = Threading.Background
 
   val onCreate = EventStream[String]()
   val onCreateFromMessage = EventStream[String]()
 
-  private def dispatcher(id: String) = dispatchers(math.abs(id.hashCode) % dispatchers.length)
+  private def dispatch[A](id: String)(f: Option[CryptoBox] => A) =
+    Serialized.future(id){cryptoBox.cryptoBox.map(f)}
 
-  private def dispatch[A](id: String)(f: Option[CryptoBox] => A) = cryptoBox.cryptoBox.map(f) (dispatcher(id))
-
-  private def dispatchFut[A](id: String)(f: Option[CryptoBox] => Future[A]) = cryptoBox.cryptoBox.flatMap(f) (dispatcher(id))
+  private def dispatchFut[A](id: String)(f: Option[CryptoBox] => Future[A]) =
+    Serialized.future(id){cryptoBox.cryptoBox.flatMap(f)}
 
   def getOrCreateSession(id: String, key: PreKey) = dispatch(id) {
     case None => None
@@ -74,26 +73,29 @@ class CryptoSessionService(cryptoBox: CryptoBoxService) {
     }
   }
 
-  def decryptMessage(sessionId: String, msg: Array[Byte], eventsWriter: PlainWriter): Future[Unit] =
-    dispatchFut(sessionId) {
+  def decryptMessage(sessionId: String, msg: Array[Byte], eventsWriter: PlainWriter): Future[Unit] = {
+    def decrypt(arg: Option[CryptoBox]): (CryptoSession, Array[Byte]) = arg match {
       case None => throw new Exception("CryptoBox missing")
       case Some(cb) =>
         verbose(s"decryptMessage($sessionId for message: ${msg.length} = ${Base64.encodeToString(msg, 0)})")
-
-        val (session, plain) =
-          loadSession(cb, sessionId).fold {
-            val sm = cb.initSessionFromMessage(sessionId, msg)
-            onCreate ! sessionId
-            onCreateFromMessage ! sessionId
-            (sm.getSession, sm.getMessage)
-          } { s =>
-            (s, s.decrypt(msg))
-          }
-        eventsWriter(plain).map { _ =>
-          session.save()
-          verbose(s"decrypted data len: ${plain.length}")
+        loadSession(cb, sessionId).fold {
+          val sm = cb.initSessionFromMessage(sessionId, msg)
+          onCreate ! sessionId
+          onCreateFromMessage ! sessionId
+          (sm.getSession, sm.getMessage)
+        } { s =>
+          (s, s.decrypt(msg))
         }
     }
+
+    dispatchFut(sessionId) { opt =>
+      val (session, plain) = decrypt(opt)
+      eventsWriter(plain).map { _ =>
+        session.save()
+        verbose(s"decrypted data len: ${plain.length}")
+      }
+    }
+  }
 
   def remoteFingerprint(sid: String) = {
     def fingerprint = withSession(sid)(_.getRemoteFingerprint)

@@ -32,7 +32,7 @@ import com.waz.service._
 import com.waz.service.otr.OtrService
 import com.waz.sync.SyncServiceHandle
 import com.waz.sync.client.PushNotificationsClient.{LoadNotificationsResponse, NotificationsResponseEncoded}
-import com.waz.sync.client.{PushNotification, PushNotificationEncoded, PushNotificationsClient}
+import com.waz.sync.client.{PushNotificationEncoded, PushNotificationsClient}
 import com.waz.threading.CancellableFuture.lift
 import com.waz.threading.{CancellableFuture, SerialDispatchQueue}
 import com.waz.utils.events._
@@ -113,30 +113,40 @@ class PushServiceImpl(context:              Context,
   private var subs = Seq.empty[Subscription]
 
   eventsStorage.list().map { nots =>
-    if(nots.nonEmpty) {
-      nots
-        .groupBy(_.pushId)
-        .map { case (id, notList) =>
-            notList.map { event =>
-              if(!isOtrEventJson(event.event)) {
-                eventsStorage.setAsDecrypted(id, event.index)
-              } else {
-                val decodedOtrEvent = ConversationEvent.ConversationEventDecoder(event.event).asInstanceOf[OtrEvent]
-                val storer = (e: Array[Byte])
-                otrService.decryptStoredOtrEvent(decodedOtrEvent,
-                  eventsStorage.getPlainWriter(event.pushId, event.index))
-              }
-            }
-        }
-      processStoredNotifications(nots)
+    if (nots.nonEmpty) {
+      processEncryptedNotifications(nots)
     }
   }
 
-  def isOtrEventJson(ev: JSONObject): Boolean =
-    ev.getString("type").equals("conversation.otr-message-add") ||
-      ev.getString("type").equals("conversation.otr-asset-add")
+  private def processEncryptedNotifications(nots: Seq[PushNotificationEvent]) =
+    Future.sequence {
+      nots
+        .groupBy(_.pushId)
+        .map { case (id, notList) =>
+          Future.sequence(notList.filter(!_.decrypted).map { eventRow =>
+            if (!isOtrEventJson(eventRow.event)) {
+              eventsStorage.setAsDecrypted(id, eventRow.index)
+            } else {
+              val otrEvent =
+                ConversationEvent.ConversationEventDecoder(eventRow.event)
+                  .asInstanceOf[OtrEvent]
+              val writer = eventsStorage.getPlainWriter(eventRow.pushId, eventRow.index)
+              otrService.decryptStoredOtrEvent(otrEvent, writer).collect {
+                case Left(Duplicate) =>
+                  notificationStorage.removeEvent(eventRow.pushId, eventRow.index)
+                case Left(error) =>
+                  val e = OtrErrorEvent(otrEvent.convId, otrEvent.time, otrEvent.from, error)
+                  eventsStorage.writeError(eventRow.pushId, eventRow.index, e)
+              }
+            }
+          })
+        }
+    }.flatMap(_ => processStoredNotifications(nots))
 
-  decryptedEvents.onAdded(processStoredNotifications)
+  private def isOtrEventJson(ev: JSONObject) =
+    ev.getString("type").equals("conversation.otr-message-add")
+
+  eventsStorage.onAdded(processEncryptedNotifications)
 
   webSocket.client.on(dispatcher) {
     case None =>
@@ -167,86 +177,32 @@ class PushServiceImpl(context:              Context,
 
   webSocket.connected.onChanged.map(_ => "web socket connection change").on(dispatcher)(syncHistory(_))
 
-  /**
-    * Decrypt events without decoding rest of events from JSON,
-    * this saves us from writing encoders for all event types */
-  private def decryptAndStoreNotifications(nots: Seq[PushNotificationEncoded]): Future[Unit] = {
-    import MessageEvent._
-    import JSONHelpers._
+  private def processStoredNotifications(notifications: Seq[PushNotificationEvent]): Future[Unit] = {
 
-    def isOtrEventJson(ev: JSONObject): Boolean =
-    ev.getString("type").equals("conversation.otr-message-add") ||
-      ev.getString("type").equals("conversation.otr-asset-add")
-
-    def decryptOtrEvents(events: Seq[JSONObject]) = {
-      val otrEvents =
-        events
-          .zipWithIndex
-          .foldLeft(Map.empty[Int, OtrEvent]) { case (map, (obj, index)) =>
-            if (isOtrEventJson(obj)) {
-              map + (index -> ConversationEvent.ConversationEventDecoder(obj).asInstanceOf[OtrEvent])
-            } else {
-              map
-            }
-          }
-
-      Future.sequence(otrEvents.map { case (index, event) =>
-        otrService.eventTransformer(Vector(event)).flatMap { result =>
-          Future.successful(if (result.nonEmpty) (index, Some(result.head)) else (index, None))
-        }
-      })
-      .map {
-        _.foldLeft(events) { case (jsonEvents, (index, eventOpt)) =>
-          eventOpt match {
-            case Some(me: MessageEvent) => jsonEvents.updated(index, MessageEventEncoder(me))
-            case Some(e) => error(s"Event $e is not a MessageEvent, ignoring"); jsonEvents
-            case None => jsonEvents.take(index - 1) ++ jsonEvents.drop(index)
+    def parseEvents(events: Seq[PushNotificationEvent]): Seq[Event] = {
+      events
+        .flatMap { event =>
+          if(event.plain.isDefined) {
+            val msg = GenericMessage(event.plain.get)
+            val msgEvent = ConversationEvent.ConversationEventDecoder(event.event)
+            otrService.parseGenericMessage(msgEvent.asInstanceOf, msg)
+          } else {
+            Some(EventDecoder(event.event))
           }
         }
-      }
     }
 
-    Future.sequence {
-      nots.map(not => {
-        decryptOtrEvents(not.events.JSONArrayToVector).map { decryptedEvents =>
-          PushNotificationEncoded(not.id, vectorToJSONArray(decryptedEvents), not.transient)
+    pipeline {
+      notifications
+        .groupBy(_.pushId)
+        .flatMap { notificationGroup =>
+          if (notificationGroup._2.forall(_.decrypted)) {
+            parseEvents(notificationGroup._2)
+          } else {
+            Seq.empty[Event]
+          }
         }
-      })
-    }.flatMap { encodedNots =>
-      decryptedEvents.insertAll(encodedNots).map(_ => Unit)
-    }
-  }
-
-  private def processStoredNotifications(nots: Seq[PushNotificationEncoded]): Future[Unit] = {
-
-    def decodePushNotifications(notifications: Seq[PushNotificationEncoded]) = {
-      verbose("Decoding notifications from JSON")
-      import com.waz.model.JSONHelpers.RichJSONArray
-      notifications.map(n =>
-        PushNotification(n.id,
-          n.events.foldLeft(Seq.empty[Event])((seq, obj) => seq :+ EventDecoder(obj)),
-          n.transient))
-    }
-
-    val allNs = decodePushNotifications(nots)
-    verbose("Parsing stored notifications")
-    if (allNs.nonEmpty) {
-      verbose(s"onPushNotifications: ${allNs.size}")
-      val ns = allNs.filter(_.hasEventForClient(clientId))
-      processing ! true
-      pipeline {
-        returning(ns.flatMap(_.eventsForClient(clientId)))(_.foreach { ev =>
-          ev.withCurrentLocalTime()
-          verbose(s"event: $ev")
-        })
-      }.flatMap { _ =>
-        verbose("deleting processed notifications")
-        decryptedEvents.removeAll(nots.map(_.id))
-        ns.lift(ns.lastIndexWhere(!_.transient)).fold(Future.successful({}))(n => idPref := Some(n.id))
-      }.andThen {
-        case _ => processing ! false
-      }
-    } else Future.successful({})
+    }.flatMap(_ => notificationStorage.removeEventsWithIds(notifications.map(_.pushId)))
   }
 
   case class Results(notifications: Vector[PushNotificationEncoded], time: Option[Instant], historyLost: Boolean)
@@ -312,7 +268,7 @@ class PushServiceImpl(context:              Context,
           onFetchedPushNotifications ! pushes.map(p => p.copy(toFetch = Some(p.receivedAt.until(clock.instant + drift))))
 
         nots
-      }).flatMap(decryptAndStoreNotifications)
+      }).flatMap(notificationStorage.insertAll)
 
     if (fetchInProgress.isCompleted) {
       verbose(s"Sync history in response to $reason")

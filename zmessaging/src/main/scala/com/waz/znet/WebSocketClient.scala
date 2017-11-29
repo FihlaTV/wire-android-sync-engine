@@ -26,7 +26,6 @@ import com.koushikdutta.async.http.{AsyncHttpGet, WebSocket}
 import com.koushikdutta.async.{ByteBufferList, DataEmitter}
 import com.waz.ZLog._
 import com.waz.model.AccountId
-import com.waz.service.ZMessaging
 import com.waz.service.ZMessaging.accountTag
 import com.waz.threading.CancellableFuture.CancelException
 import com.waz.threading.{CancellableFuture, SerialDispatchQueue, Threading}
